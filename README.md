@@ -17,4 +17,7 @@ Requirement
 
 ### Analyze neural networks
 
-Example of analyze ResNet-18.
+Example of analyze ResNet-18 on ImageNet dataset.
+```
+python3 analyze_nn.py resnet18 imagenet
+```
