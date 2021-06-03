@@ -22,7 +22,7 @@ def load_net(name):
 
 def load_datasets(name,data_root):
     if name=='imagenet':
-        g=datasets.ImageNetLoaderGenerator(data_root+'/imagenet','imagenet',128,128,4)
+        g=datasets.ImageNetLoaderGenerator(data_root+'/imagenet','imagenet',128,8,4)
         test_loader=g.test_loader(shuffle=True)
         calib_loader=g.train_loader()
         calib_loader.dataset.transform=g.transform_test
@@ -102,7 +102,7 @@ if __name__=='__main__':
             inp=inp.cuda()
             net(inp)
             cnt+=inp.size(0)
-            if cnt>statistic_size:
+            if cnt>=statistic_size:
                 break
     
     zero_out_exclude_in_zero_tot=0
