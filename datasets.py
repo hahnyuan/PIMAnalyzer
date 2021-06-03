@@ -14,7 +14,6 @@ from PIL import ImageFile
 import random
 import torch.nn.functional as F
 from torch.utils.data import Dataset
-from data_augmentation import augmentation_detection_tansforms,detection_tansforms
 
 def calculate_n_correct(outputs,targets):
     _, predicted = outputs.max(1)

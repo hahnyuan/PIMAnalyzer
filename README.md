@@ -18,6 +18,9 @@ Requirement
 ### Analyze neural networks
 
 Example of analyze ResNet-18 on ImageNet dataset.
+
+At first, put your ImageNet dataset into folder `data/imagenet`.
+Then run this command:
 ```
 python3 analyze_nn.py resnet18 imagenet
 ```

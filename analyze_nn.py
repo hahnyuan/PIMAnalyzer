@@ -20,9 +20,9 @@ def load_net(name):
     net=net.cuda()
     return net
 
-def load_datasets(name):
+def load_datasets(name,data_root):
     if name=='imagenet':
-        g=datasets.ImageNetLoaderGenerator('/datasets/imagenet','imagenet',128,8,4)
+        g=datasets.ImageNetLoaderGenerator(data_root+'/imagenet','imagenet',128,128,4)
         test_loader=g.test_loader(shuffle=True)
         calib_loader=g.train_loader()
         calib_loader.dataset.transform=g.transform_test
@@ -34,6 +34,7 @@ def parse_args():
     parser=argparse.ArgumentParser()
     parser.add_argument('net_name',type=str)
     parser.add_argument('dataset',type=str)
+    parser.add_argument('--data_root',default="data",type=str)
     parser.add_argument('--statistic_size',type=int,default=32)
     args=parser.parse_args()
     return args
@@ -63,31 +64,36 @@ def wrap_modules_in_net(net):
             _m.mode='raw'
     return wrapped_modules
 
-def quant_calib(net,wrapped_modules,calib_loader):
-    calib_size=512
+def quant_calib(net,wrapped_modules,calib_loader,calib_size=128):
+    calib_layers=[]
     for name,module in wrapped_modules.items():
-        module.mode='calibration_statistic'
-        print(f"calibrate {name}")
-        cnt=0
-        with torch.no_grad():
-            for inp,target in calib_loader:
-                inp=inp.cuda()
-                net(inp)
-                cnt+=inp.size(0)
-                if cnt>calib_size:
-                    break
-        module.calibrate()
+        module.mode='calibration_forward'
+        calib_layers.append(name)
+    print(f"prepare calibration for {calib_layers}")
+    cnt=0
+    calib_inps=[]
+    with torch.no_grad():
+        for inp,target in calib_loader:
+            inp=inp.cuda()
+            calib_inps.append(inp)
+            cnt+=inp.size(0)
+            if cnt>=calib_size:
+                break
+    net(torch.cat(calib_inps,0))
+    for name,module in wrapped_modules.items():
         module.mode='quant_forward'
+    del calib_inps
+    print("calibration finished")
 
 if __name__=='__main__':
     args=parse_args()
     net=load_net(args.net_name)
-    test_loader,calib_loader=load_datasets(args.dataset)
+    test_loader,calib_loader=load_datasets(args.dataset,args.data_root)
     wrapped_modules=wrap_modules_in_net(net)
     quant_calib(net,wrapped_modules,calib_loader)
 
 
-    statistic_size=args.statistics_size
+    statistic_size=args.statistic_size
     for name,module in wrapped_modules.items():
         module.mode='statistic_forward'
     cnt=0

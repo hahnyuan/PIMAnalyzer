@@ -20,20 +20,18 @@ class QuantizeConv2d(nn.Conv2d):
         
         self.mode=None
         self.activation_quant_mode=None # in_quant, in_quant_unsigned
-        self.weight_bits=4
+        self.weight_bits=None
         self.weight_scale=None
-        self.act_bits=4
-        self.in_scale=None
-        self.statistic={'calibration_in':[],'calibration_out':[]}
-        
+        self.act_bits=None
+        self.x_scale=None
     
     def forward(self, x):
         if self.mode=='raw':
             out=super().forward(x)
         elif self.mode=="quant_forward":
             out=self.quant_forward(x)
-        elif self.mode=="calibration_statistic":
-            out=self.calibration_statistic(x)
+        elif self.mode=="calibration_forward":
+            out=self.calibrate_forward(x)
         elif self.mode=='statistic_forward':
             out=self.statistic_forward(x)
         else:
@@ -41,106 +39,41 @@ class QuantizeConv2d(nn.Conv2d):
         return out
     
     def quant_forward(self,x):
-        assert self.weight_scale is not None
+        assert self.weight_scale is not None,f"You should run calibrate_forward before run quant_forward for {self}"
         if 'in_quant' in self.activation_quant_mode:
             if self.activation_quant_mode=='in_quant_unsigned':
                 in_max_int=2**(self.act_bits)-1
             else:
                 in_max_int=2**(self.act_bits-1)-1
-            in_integer=torch.round_(x/self.in_scale).clamp_(-in_max_int,in_max_int)
-            x=in_integer*self.in_scale
+            in_integer=torch.round_(x/self.x_scale).clamp_(-in_max_int,in_max_int)
+            x=in_integer*self.x_scale
         w_max_int=2**(self.weight_bits)-1
         integer=torch.round_(self.weight.data/self.weight_scale).clamp_(-w_max_int,w_max_int)
         w_q=integer*self.weight_scale
         out_q=F.conv2d(x,w_q,self.bias,self.stride,self.padding,self.dilation,self.groups)
         return out_q
     
-    def calibration_statistic(self,x):
-        out=super().forward(x)
-        self.statistic['calibration_in'].append(x.detach().cpu())
-        self.statistic['calibration_out'].append(out.detach().cpu())
-        return out
-    
-    def calibrate(self,clear_data=True,p=2.4,co_optimize=False):
-        assert len(self.statistic['calibration_in'])!=0
-        xs=torch.cat(self.statistic['calibration_in'],0).cuda()
-        ys=torch.cat(self.statistic['calibration_out'],0).cuda()
-        w_absmax=self.weight.data.abs().max()
-        pos_intervals=2**(self.weight_bits-1)-1
-        max_int=2**(self.weight_bits-1)-1
-        if 'in_quant' in self.activation_quant_mode:
-            in_absmax=xs.data.abs().max()
-            if self.activation_quant_mode=='in_quant_unsigned':
-                in_pos_intervals=2**(self.act_bits)-1
-                in_max_int=2**(self.act_bits)-1
-            else:
-                in_pos_intervals=2**(self.act_bits-1)-1
-                in_max_int=2**(self.act_bits-1)-1
-        
-        if co_optimize:
-            min_score=1e9
-            t=tqdm(range(40))
-            for weight_i in t:
-                for activation_i in range(40):
-                    if 'in_quant' in self.activation_quant_mode:
-                        new_in_max = in_absmax * (1.0 - (activation_i * 0.015))
-                        in_scale=new_in_max/in_pos_intervals
-                        xs_q=torch.round_(xs/in_scale).clamp_(-in_max_int,in_max_int).mul_(in_scale)
-                    else:
-                        in_scale=None
-                        xs_q=xs
-                    new_max = w_absmax * (1.0 - (weight_i * 0.015))
-                    scale=new_max/pos_intervals
-                    w_q=torch.round_(self.weight.data/scale).clamp_(-max_int,max_int).mul_(scale)
-                    out_q=F.conv2d(xs_q,w_q,self.bias,self.stride,self.padding,self.dilation,self.groups)
-                    # value_q_after_act=self.reconstruct_act_func(out_q)
-                    score = lp_loss(ys, out_q, p=p, reduction='all')
-                    if score < min_score:
-                        min_score = score
-                        best_in_scale=in_scale
-                        best_weight_scale=scale
-                    del xs_q,w_q,out_q
-                t.set_postfix({'min_score':min_score.item(),'best_in_scale':best_in_scale.item(),'best_weight_scale':best_weight_scale.item()})
+    def calibrate_forward(self,x_sim):
+        assert self.weight_bits is not None and self.act_bits is not None, f"You should set the weight_bits and bias_bits for {self}"
+        if not hasattr(x_sim,'scale'):
+            x_sim=SignedQuantizeCalibration().apply(x_sim,self.act_bits)
+        # raw_out=super().forward(x_sim)
+        weight_sim=SignedQuantizeCalibration().apply(self.weight,self.weight_bits)
+        self.x_scale=xscale=x_sim.scale
+        self.weight_integer=weight_sim.integer
+        self.weight_scale=weight_sim.scale
+        if self.bias is not None:
+            # bias_sim=SignedQuantizeCalibration().apply(self.bias,16)
+            bias_scale=self.x_scale*self.weight_scale
+            bias_integer=torch.round(self.bias/bias_scale).clamp(-2**15,2**15-1)
+            bias_sim=bias_integer*bias_scale
+            self.bias_scale=bias_scale
+            self.bias_integer=bias_integer
         else:
-            min_score=1e9
-            for activation_i in range(40):
-                if 'in_quant' in self.activation_quant_mode:
-                    new_in_max = in_absmax * (1.0 - (activation_i * 0.015))
-                    in_scale=new_in_max/in_pos_intervals
-                    xs_q=torch.round_(xs/in_scale).clamp_(-in_max_int,in_max_int).mul_(in_scale)
-                else:
-                    in_scale=None
-                    xs_q=xs
-                out_q=F.conv2d(xs_q,self.weight.data,self.bias,self.stride,self.padding,self.dilation,self.groups)
-                # value_q_after_act=self.reconstruct_act_func(out_q)
-                score = lp_loss(ys, out_q, p=p, reduction='all')
-                if score < min_score:
-                    min_score = score
-                    best_in_scale=in_scale
-                del xs_q,out_q
-            min_score=1e9
-            for weight_i in range(40):
-                if 'in_quant' in self.activation_quant_mode:
-                    xs_q=torch.round_(xs/best_in_scale).clamp_(-in_max_int,in_max_int).mul_(best_in_scale)
-                else:
-                    in_scale=None
-                    xs_q=xs
-                new_max = w_absmax * (1.0 - (weight_i * 0.015))
-                scale=new_max/pos_intervals
-                w_q=torch.round_(self.weight.data/scale).clamp_(-max_int,max_int).mul_(scale)
-                out_q=F.conv2d(xs_q,w_q,self.bias,self.stride,self.padding,self.dilation,self.groups)
-                # value_q_after_act=self.reconstruct_act_func(out_q)
-                score = lp_loss(ys, out_q, p=p, reduction='all')
-                if score < min_score:
-                    min_score = score
-                    best_weight_scale=scale
-                del xs_q,w_q,out_q
-        assert best_weight_scale is not None
-        self.in_scale=best_in_scale
-        self.weight_scale=best_weight_scale
-        if clear_data:
-            self.statistic['calibration_in'].clear()
-            self.statistic['calibration_out'].clear()
+            bias_sim=None
+        out_sim_=F.conv2d(x_sim, weight_sim, bias_sim, self.stride, self.padding, self.dilation, self.groups)
+        out_sim=SignedQuantizeCalibration().apply(out_sim_,self.act_bits)
+        return out_sim
 
 class BitwiseStatisticConv2d(QuantizeConv2d):
     def __init__(self,in_channels: int,
@@ -154,6 +87,7 @@ class BitwiseStatisticConv2d(QuantizeConv2d):
         padding_mode: str = 'zeros'):
         super().__init__(in_channels,out_channels,kernel_size,stride,padding,dilation,groups,bias,padding_mode)
         self.slice_size=None
+        self.statistic={}
         
     def statistic_forward(self,x):
         if 'in_quant' in self.activation_quant_mode:
@@ -161,8 +95,8 @@ class BitwiseStatisticConv2d(QuantizeConv2d):
                 in_max_int=2**(self.act_bits)-1
             else:
                 in_max_int=2**(self.act_bits-1)-1
-            in_integer=torch.round_(x/self.in_scale).clamp_(-in_max_int,in_max_int)
-            x=in_integer*self.in_scale
+            in_integer=torch.round_(x/self.x_scale).clamp_(-in_max_int,in_max_int)
+            x=in_integer*self.x_scale
         w_max_int=2**(self.weight_bits)-1
         w_integer=torch.round_(self.weight.data/self.weight_scale).clamp_(-w_max_int,w_max_int)
         w_q=w_integer*self.weight_scale

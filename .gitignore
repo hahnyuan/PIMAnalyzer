@@ -1,0 +1,14 @@
+tmp
+*.pyc
+__pycache__
+*.pth
+.vscode
+checkpoint
+*.log
+*.csv
+*.png
+*.jpg
+output
+*.weights
+*.tmp.*
+data
