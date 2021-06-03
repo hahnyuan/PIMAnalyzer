@@ -12,6 +12,8 @@ Analyzing these distributions is expected to be benefit to the future design of 
 Requirement 
 - python>=3.5
 - pytorch>=1.5
+- matplotlib
+- pandas
 
 # Usage
 
@@ -24,3 +26,5 @@ Then run this command:
 ```
 python3 analyze_nn.py resnet18 imagenet
 ```
+
+The distribution of each layer, and the distribution of all layers is printed.
