@@ -11,6 +11,7 @@ import seaborn as sns
 import pandas as pd
 import os
 import argparse
+from quantization import quantizer
 
 def load_net(name):
     if name == 'resnet18':
@@ -22,8 +23,13 @@ def load_net(name):
 
 def load_datasets(name,data_root):
     if name=='imagenet':
-        g=datasets.ImageNetLoaderGenerator(data_root+'/imagenet','imagenet',128,8,4)
+        g=datasets.ImageNetLoaderGenerator(data_root,'imagenet',128,8,4)
         test_loader=g.test_loader(shuffle=True)
+        calib_loader=g.train_loader()
+        calib_loader.dataset.transform=g.transform_test
+    elif name=='cifar10':
+        g=datasets.CIFARLoaderGenerator(data_root,'cifar10',128,8,4)
+        test_loader=g.test_loader(shuffle=False)
         calib_loader=g.train_loader()
         calib_loader.dataset.transform=g.transform_test
     else:
@@ -39,11 +45,11 @@ def parse_args():
     args=parser.parse_args()
     return args
 
-def wrap_modules_in_net(net):
+def wrap_modules_in_net(net,act_bits=4,weight_bits=4):
     wrapped_modules={}
     slice_size=4
-    act_bits=4
-    weight_bits=4
+    
+    
     for name,m in net.named_modules():
         if isinstance(m,nn.Conv2d):
             if m.bias is None:
@@ -55,7 +61,7 @@ def wrap_modules_in_net(net):
             _m.act_bits=act_bits
             _m.weight_bits=weight_bits
             _m.slice_size=slice_size
-            _m.activation_quant_mode='in_quant_unsigned'
+            _m.quantizer=quantizer.ACIQ(weight_bits,act_bits)
             wrapped_modules[name]=_m
             _m.weight.data=m.weight.data
             _m.bias=m.bias

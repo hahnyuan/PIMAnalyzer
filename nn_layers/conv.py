@@ -19,11 +19,12 @@ class QuantizeConv2d(nn.Conv2d):
         super().__init__(in_channels,out_channels,kernel_size,stride,padding,dilation,groups,bias,padding_mode)
         
         self.mode=None
-        self.activation_quant_mode=None # in_quant, in_quant_unsigned
+        self.quantizer=None
         self.weight_bits=None
         self.weight_scale=None
         self.act_bits=None
         self.x_scale=None
+        self.bn_fused=False
     
     def forward(self, x):
         if self.mode=='raw':
@@ -39,41 +40,70 @@ class QuantizeConv2d(nn.Conv2d):
         return out
     
     def quant_forward(self,x):
-        assert self.weight_scale is not None,f"You should run calibrate_forward before run quant_forward for {self}"
-        if 'in_quant' in self.activation_quant_mode:
-            if self.activation_quant_mode=='in_quant_unsigned':
-                in_max_int=2**(self.act_bits)-1
-            else:
-                in_max_int=2**(self.act_bits-1)-1
-            in_integer=torch.round_(x/self.x_scale).clamp_(-in_max_int,in_max_int)
-            x=in_integer*self.x_scale
-        w_max_int=2**(self.weight_bits)-1
-        integer=torch.round_(self.weight.data/self.weight_scale).clamp_(-w_max_int,w_max_int)
-        w_q=integer*self.weight_scale
-        out_q=F.conv2d(x,w_q,self.bias,self.stride,self.padding,self.dilation,self.groups)
-        return out_q
-    
-    def calibrate_forward(self,x_sim):
-        assert self.weight_bits is not None and self.act_bits is not None, f"You should set the weight_bits and bias_bits for {self}"
-        if not hasattr(x_sim,'scale'):
-            x_sim=SignedQuantizeCalibration().apply(x_sim,self.act_bits)
-        # raw_out=super().forward(x_sim)
-        weight_sim=SignedQuantizeCalibration().apply(self.weight,self.weight_bits)
-        self.x_scale=xscale=x_sim.scale
-        self.weight_integer=weight_sim.integer
-        self.weight_scale=weight_sim.scale
-        if self.bias is not None:
-            # bias_sim=SignedQuantizeCalibration().apply(self.bias,16)
-            bias_scale=self.x_scale*self.weight_scale
-            bias_integer=torch.round(self.bias/bias_scale).clamp(-2**15,2**15-1)
-            bias_sim=bias_integer*bias_scale
-            self.bias_scale=bias_scale
-            self.bias_integer=bias_integer
-        else:
-            bias_sim=None
-        out_sim_=F.conv2d(x_sim, weight_sim, bias_sim, self.stride, self.padding, self.dilation, self.groups)
-        out_sim=SignedQuantizeCalibration().apply(out_sim_,self.act_bits)
+        # assert self.weight_scale is not None,f"You should run calibrate_forward before run quant_forward for {self}"
+        assert self.quantizer.calibrated is not None,f"You should run calibrate_forward before run quant_forward for {self}"
+        # if 'in_quant' in self.activation_quant_mode:
+        #     if self.activation_quant_mode=='in_quant_unsigned':
+        #         in_max_int=2**(self.act_bits)-1
+        #     else:
+        #         in_max_int=2**(self.act_bits-1)-1
+        #     in_integer=torch.round_(x/self.x_scale).clamp_(-in_max_int,in_max_int)
+        #     x=in_integer*self.x_scale
+        # w_max_int=2**(self.weight_bits)-1
+        # integer=torch.round_(self.weight.data/self.weight_scale).clamp_(-w_max_int,w_max_int)
+        # w_q=integer*self.weight_scale
+        # out_q=F.conv2d(x,w_q,self.bias,self.stride,self.padding,self.dilation,self.groups)
+        weight_sim,bias_sim=self.quantizer.quant_weight_bias(self.weight,self.bias)
+        x_sim=self.quantizer.quant_activation(x)
+        out_sim=F.conv2d(x_sim, weight_sim, bias_sim, self.stride, self.padding, self.dilation, self.groups)
         return out_sim
+    
+    def calibrate_forward(self,x):
+        assert self.weight_bits is not None and self.act_bits is not None, f"You should set the weight_bits and bias_bits for {self}"
+        self.quantizer.calibration(self.weight,x)
+        weight_sim,bias_sim=self.quantizer.quant_weight_bias(self.weight,self.bias)
+        x_sim=self.quantizer.quant_activation(x)
+        # if not hasattr(x_sim,'scale'):
+        #     x_sim=SignedQuantizeCalibration().apply(x_sim,self.act_bits)
+        # # raw_out=super().forward(x_sim)
+        # weight_sim=SignedQuantizeCalibration().apply(self.weight,self.weight_bits)
+        # self.x_scale=xscale=x_sim.scale
+        # self.weight_integer=weight_sim.integer
+        # self.weight_scale=weight_sim.scale
+        # if self.bias is not None:
+        #     # bias_sim=SignedQuantizeCalibration().apply(self.bias,16)
+        #     bias_scale=self.x_scale*self.weight_scale
+        #     bias_integer=torch.round(self.bias/bias_scale).clamp(-2**15,2**15-1)
+        #     bias_sim=bias_integer*bias_scale
+        #     self.bias_scale=bias_scale
+        #     self.bias_integer=bias_integer
+        # else:
+        #     bias_sim=None
+        out_sim=F.conv2d(x_sim, weight_sim, bias_sim, self.stride, self.padding, self.dilation, self.groups)
+        # out_sim=SignedQuantizeCalibration().apply(out_sim_,self.act_bits)
+        return out_sim
+
+class StatisticConv2d(QuantizeConv2d):
+    def __init__(self,in_channels: int,
+        out_channels: int,
+        kernel_size,
+        stride = 1,
+        padding = 0,
+        dilation = 1,
+        groups: int = 1,
+        bias: bool = True,
+        padding_mode: str = 'zeros'):
+        super().__init__(in_channels, out_channels, kernel_size, stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias, padding_mode=padding_mode)
+        self.slice_size=None
+        self.statistic={'crossbar_weight':[]}
+    
+    def statistic_forward(self,x):
+        raw_w=self.weight.data
+        n_slices=self.slice_size
+        self.statistic[f'crossbar_weight']=raw_w.view(self.out_channels,self.slice_size)
+        # print(f"x_slice {x_slice.size()} W_slice {W_slice.size()}")
+        return raw_out
+
 
 class BitwiseStatisticConv2d(QuantizeConv2d):
     def __init__(self,in_channels: int,
@@ -157,3 +187,93 @@ class BitwiseStatisticConv2d(QuantizeConv2d):
                     self.statistic[f'tot_out_{w_bit_i}_exclude_in_zero']+=psum.numel()*n_slice-oc*zero_in_num
                 
         return raw_out
+
+class BaseMappedConv2d(nn.Conv2d):
+    """
+    Map the nn.Conv2d to different size of crossbar, the MVM is processed in floating point
+    """
+    def __init__(self,in_channels: int,
+        out_channels: int,
+        kernel_size,
+        stride = 1,
+        padding = 0,
+        dilation = 1,
+        groups: int = 1,
+        bias: bool = True,
+        padding_mode: str = 'zeros'):
+        super().__init__(in_channels,out_channels,kernel_size,stride,padding,dilation,groups,bias,padding_mode)
+        
+        self.mode='raw`'
+
+        self.crossbar_cols=None
+        self.crossbar_rows=None
+        self.n_cell_per_weight=None
+        self.n_input_steps=None
+    
+    def map_to_crossbars(self,rows,cols,n_cell_per_weight=1,n_input_steps=1):
+        self.crossbar_cols=cols
+        self.crossbar_rows=rows
+        self.n_cell_per_weight=n_cell_per_weight
+        self.n_input_steps=n_input_steps
+        self.crossbars=nn.ModuleList()
+        assert n_cell_per_weight==1,f"BaseMappedConv2d only support n_cell_per_weight=1"
+        assert n_input_steps==1,f"BaseMappedConv2d only support n_input_steps=1"
+        input_size=self.in_channels//self.groups*self.kernel_size[0]*self.kernel_size[1]
+        out_c_ind=0
+        while out_c_ind<self.out_channels:
+            w_col_chunk=self.weight[out_c_ind:out_c_ind+self.crossbar_cols]
+            input_ind=0
+            while input_ind<input_size:
+                pass
+            out_c_ind+=self.crossbar_cols
+
+
+    def forward(self, x):
+        if self.mode=='raw':
+            out=super().forward(x)
+        elif self.mode=="forward":
+            out=self.mapped_forward(x)
+        else:
+            raise NotImplementedError
+        return out
+    
+    def mapped_forward(self,x):
+        assert self.crossbar_cols is not None,f"You should map the conv to hte crossbar before using mapped_forward"
+        if 'in_quant' in self.activation_quant_mode:
+            if self.activation_quant_mode=='in_quant_unsigned':
+                in_max_int=2**(self.act_bits)-1
+            else:
+                in_max_int=2**(self.act_bits-1)-1
+            in_integer=torch.round_(x/self.x_scale).clamp_(-in_max_int,in_max_int)
+            x=in_integer*self.x_scale
+        w_max_int=2**(self.weight_bits)-1
+        integer=torch.round_(self.weight.data/self.weight_scale).clamp_(-w_max_int,w_max_int)
+        w_q=integer*self.weight_scale
+        out_q=F.conv2d(x,w_q,self.bias,self.stride,self.padding,self.dilation,self.groups)
+        return out_q
+    
+    def calibrate_forward(self,x_sim):
+        assert self.weight_bits is not None and self.act_bits is not None, f"You should set the weight_bits and bias_bits for {self}"
+        if not hasattr(x_sim,'scale'):
+            x_sim=SignedQuantizeCalibration().apply(x_sim,self.act_bits)
+        # raw_out=super().forward(x_sim)
+        weight_sim=SignedQuantizeCalibration().apply(self.weight,self.weight_bits)
+        self.x_scale=xscale=x_sim.scale
+        self.weight_integer=weight_sim.integer
+        self.weight_scale=weight_sim.scale
+        if self.bias is not None:
+            # bias_sim=SignedQuantizeCalibration().apply(self.bias,16)
+            bias_scale=self.x_scale*self.weight_scale
+            bias_integer=torch.round(self.bias/bias_scale).clamp(-2**15,2**15-1)
+            bias_sim=bias_integer*bias_scale
+            self.bias_scale=bias_scale
+            self.bias_integer=bias_integer
+        else:
+            bias_sim=None
+        out_sim_=F.conv2d(x_sim, weight_sim, bias_sim, self.stride, self.padding, self.dilation, self.groups)
+        out_sim=SignedQuantizeCalibration().apply(out_sim_,self.act_bits)
+        return out_sim
+
+class BitwiseQuantMappedConv2d(QuantizeConv2d):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size, stride, padding, dilation, groups: int, bias: bool, padding_mode: str):
+        super().__init__(in_channels, out_channels, kernel_size, stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias, padding_mode=padding_mode)

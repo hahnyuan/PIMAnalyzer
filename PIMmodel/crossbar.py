@@ -2,17 +2,38 @@ import torch
 import torch.nn as nn
 
 
-class CrossBar(nn.Module):
-    def __init__(self,rows,cols,open_rows_per_run=None):
+class BaseCrossbar(nn.Module):
+    def __init__(self,rows,cols,weight,input_process=None,output_process=None,weight_dynamic_process=None):
         super().__init__()
         self.rows=rows
         self.cols=cols
-        self.open_rows_per_run=open_rows_per_run
-    
+        self.weight=nn.parameter(weight)
+        if input_process is not None:
+            self.input_process=input_process
+        else:
+            self.input_process=lambda x:x
+        if output_process is not None:
+            self.output_process=output_process
+        else:
+            self.output_process=lambda x:x
+        if weight_dynamic_process is not None:
+            self.weight_dynamic_process=weight_dynamic_process
+        else:
+            self.weight_dynamic_process=lambda x:x 
+
     def forward(self,x):
+        self.input_process(x)
+        weight=self.weight_dynamic_process(self.weight)
+        out=torch.matmul(x,weight)
+        self.output_process(out)
+        return out
+
+class BatchedCrossbar(nn.Module):
+    def __init__(self,):
+        super().__init__()
         pass
 
-class NoiseCrossBar(CrossBar):
+class NoiseCrossbar(CrossBar):
     def forward(self,x):
         with torch.no_grad():
             # thermal noise, shot noise
