@@ -44,7 +44,7 @@ class ACIQ(BaseQuantizer):
                 max=weight.data.abs().max()
             else:
                 max=weight.data.abs().view(weight.size(0),-1).max(1)[0].view(-1,*[1]*(weight.dim()-1))
-            interval=max/(2**(self.w_bit-1)-0.5) # symmetric quantization
+            interval=max/(2**(self.w_bit-1)-0.5) # symmetric quantization, do not need clamp
             w_int=torch.round_(weight/interval)
             w_sim=w_int*interval
             # bias-correction
@@ -148,10 +148,32 @@ class EasyQuant(BaseQuantizer):
         self.eq_alpha=eq_alpha
         self.eq_beta=eq_beta
         self.eq_n=eq_n
-        self.iterate
+        self.weight_interval=None
+        self.input_interval=None
 
-    def cos_similarity_iterate(q_out):
-        pass
+    def quant_weight(self,weight,weight_interval=None):
+        if weight_interval is None:
+            weight_interval=self.weight_interval
+        with torch.no_grad():
+            if self.channel_wise:
+                weight_interval=weight_interval.view(-1,*[1]*(weight.dim()-1))
+            max_value=2**(self.w_bit-1)
+            w_int=torch.round_(weight/weight_interval).clamp(-max_value,max_value-1)
+            w_sim=w_int*weight_interval
+            # bias-correction
+        return w_sim
+    
+    def quant_weight_bias(self, weight, bias):
+        return self.quant_weight(weight),bias
+
+    def quant_activation(self,tensor,input_interval=None):
+        if input_interval is None: input_interval=self.input_interval
+        if self.channel_wise:
+            input_interval=input_interval.view(1,-1,*[1]*(tensor.dim()-2))
+        max_value=2**(self.a_bit-1)
+        a_int=torch.round_(tensor/input_interval).clamp(-max_value,max_value-1)
+        a_sim=a_int*input_interval
+        return a_sim
 
     def calibration(self,input,weight,bias,op):
         # step1: collection the FP32 values
@@ -167,7 +189,50 @@ class EasyQuant(BaseQuantizer):
             else:
                 max=weight.data.abs().max()
             interval=max/(2**(self.w_bit-1)-0.5) # symmetric quantization
+            raw_out=torch.cat(self.raw_outs,0).to(input.device)
+            max_similarity=-2
+            best_weight_interval=None
+            best_out=None
             for i in range(self.eq_n):
                 now_interval=(self.eq_alpha+i/self.eq_n*(self.eq_beta-self.eq_alpha))*interval
-            w_int=torch.round_(weight/interval)
-            w_sim=w_int*interval
+                max_value=2**(self.w_bit-1)
+                w_int=torch.round_(weight/now_interval).clamp(-max_value,max_value-1)
+                w_sim=w_int*now_interval
+                out_sim=op(input,w_sim,bias)
+                # TODO: bias quantization
+                similarity=F.cosine_similarity(out_sim.view(-1),raw_out.view(-1),0)
+                if similarity>max_similarity:
+                    best_weight_interval=now_interval
+                    max_similarity=similarity
+                    best_out=out_sim
+            self.weight_interval=best_weight_interval
+            print(f"Set weight_interval={best_weight_interval}")
+            return best_out
+        # step3: search for the best S^a of each layer
+        elif self.calibration_step==3:
+            w_sim,b_sim=self.quant_weight_bias(weight,bias)
+            # initialize
+            if self.channel_wise:
+                max=input.data.abs().max(1)
+            else:
+                max=input.data.abs().max()
+            interval=max/(2**(self.a_bit-1)-0.5) # symmetric quantization
+            raw_out=torch.cat(self.raw_outs,0).to(input.device)
+            max_similarity=-2
+            best_input_interval=None
+            best_out=None
+            for i in range(self.eq_n):
+                now_interval=(self.eq_alpha+i/self.eq_n*(self.eq_beta-self.eq_alpha))*interval
+                max_value=2**(self.a_bit-1)
+                a_int=torch.round_(input/now_interval).clamp(-max_value,max_value-1)
+                a_sim=a_int*now_interval
+                out_sim=op(a_sim,w_sim,b_sim)
+                # TODO: bias quantization
+                similarity=F.cosine_similarity(out_sim.view(-1),raw_out.view(-1),0)
+                if similarity>max_similarity:
+                    best_input_interval=now_interval
+                    max_similarity=similarity
+                    best_out=out_sim
+            self.input_interval=best_input_interval
+            print(f"Set input_interval={best_input_interval}")
+            return best_out

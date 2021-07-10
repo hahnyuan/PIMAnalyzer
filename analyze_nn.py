@@ -65,7 +65,6 @@ def _fold_bn(conv_module, bn_module):
             bias = beta
     return weight, bias
 
-
 def fold_bn_into_conv(conv_module, bn_module):
     w, b = _fold_bn(conv_module, bn_module)
     if conv_module.bias is None:
@@ -77,7 +76,6 @@ def fold_bn_into_conv(conv_module, bn_module):
 def wrap_modules_in_net(net,act_bits=4,weight_bits=4,fuse_bn=False,layer_quantizer=quantizer.ACIQ):
     wrapped_modules={}
     slice_size=4
-    
     
     for name,m in net.named_modules():
         if isinstance(m,nn.Conv2d):
@@ -139,7 +137,6 @@ if __name__=='__main__':
     test_loader,calib_loader=load_datasets(args.dataset,args.data_root)
     wrapped_modules=wrap_modules_in_net(net)
     quant_calib(net,wrapped_modules,calib_loader)
-
 
     statistic_size=args.statistic_size
     for name,module in wrapped_modules.items():
