@@ -56,6 +56,7 @@ class QuantizeConv2d(nn.Conv2d):
         weight_sim,bias_sim=self.quantizer.quant_weight_bias(self.weight,self.bias)
         x_sim=self.quantizer.quant_activation(x)
         out_sim=F.conv2d(x_sim, weight_sim, bias_sim, self.stride, self.padding, self.dilation, self.groups)
+        out_sim=self.quantizer.quant_output(out_sim)
         return out_sim
     
     def get_quant_weight_bias(self):

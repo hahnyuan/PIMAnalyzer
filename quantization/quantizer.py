@@ -22,13 +22,16 @@ class BaseQuantizer():
         self.calibrated=False
 
     def quant_weight_bias(self,weight,bias):
-        pass
+        return weight,bias
 
-    def quant_activation(self,tensor):
-        pass
-
+    def quant_activation(self,x):
+        return x
+    
+    def quant_output(self,out):
+        return out
+    
     def calibration(self,x,weight,bias,op)->Tensor:
-        pass
+        return op(x,weight,bias)
 
 class ACIQ(BaseQuantizer):
     """
@@ -106,8 +109,8 @@ class ACIQ(BaseQuantizer):
         self.calibrated=True
         weight_sim,bias_sim=self.quant_weight_bias(weight,bias)
         x_sim=self.quant_activation(x)
-        out_sim=op(x_sim, weight_sim, bias_sim)
-        return out_sim
+        output_sim=op(x_sim, weight_sim, bias_sim)
+        return output_sim
 
 
 class DynamicACIQ(ACIQ):
@@ -189,13 +192,13 @@ class EasyQuant(BaseQuantizer):
             max_value=2**(self.w_bit-1)
             w_int=torch.round_(weight/now_interval).clamp(-max_value,max_value-1)
             w_sim=w_int*now_interval
-            out_sim=op(x,w_sim,bias)
+            output_sim=op(x,w_sim,bias)
             # TODO: bias quantization
-            similarity=F.cosine_similarity(out_sim.view(-1),raw_out.view(-1),0)
+            similarity=F.cosine_similarity(output_sim.view(-1),raw_out.view(-1),0)
             if similarity>max_similarity:
                 best_weight_interval=now_interval
                 max_similarity=similarity
-                best_out=out_sim
+                best_out=output_sim
         return best_weight_interval,best_out
 
     def search_best_input(self,x,w_sim,b_sim,op,raw_out,init_interval):
@@ -207,12 +210,12 @@ class EasyQuant(BaseQuantizer):
             max_value=2**(self.a_bit-1)
             a_int=torch.round_(x/now_interval).clamp(-max_value,max_value-1)
             a_sim=a_int*now_interval
-            out_sim=op(a_sim,w_sim,b_sim)
-            similarity=F.cosine_similarity(out_sim.view(-1),raw_out.view(-1),0)
+            output_sim=op(a_sim,w_sim,b_sim)
+            similarity=F.cosine_similarity(output_sim.view(-1),raw_out.view(-1),0)
             if similarity>max_similarity:
                 best_input_interval=now_interval
                 max_similarity=similarity
-                best_out=out_sim
+                best_out=output_sim
         return best_input_interval,best_out
 
     def calibration(self,x,weight,bias,op):
@@ -249,7 +252,7 @@ class EasyQuant(BaseQuantizer):
             print(f"Set input_interval={self.input_interval.view(-1)}")
             return best_out
 
-class PowerOf2EasyQuant(EasyQuant):
+class DirectPowerOf2EasyQuant(EasyQuant):
     def __init__(self, w_bit, a_bit,channel_wise=False,eq_alpha=0.5,eq_beta=2,eq_n=10) -> None:
         super().__init__(w_bit, a_bit, channel_wise=channel_wise, eq_alpha=eq_alpha, eq_beta=eq_beta, eq_n=eq_n)
 
@@ -263,13 +266,13 @@ class PowerOf2EasyQuant(EasyQuant):
             max_value=2**(self.w_bit-1)
             w_int=torch.round_(weight/now_interval).clamp(-max_value,max_value-1)
             w_sim=w_int*now_interval
-            out_sim=op(x,w_sim,bias)
+            output_sim=op(x,w_sim,bias)
             # TODO: bias quantization
-            similarity=F.cosine_similarity(out_sim.view(-1),raw_out.view(-1),0)
+            similarity=F.cosine_similarity(output_sim.view(-1),raw_out.view(-1),0)
             if similarity>max_similarity:
                 best_weight_interval=now_interval
                 max_similarity=similarity
-                best_out=out_sim
+                best_out=output_sim
         return best_weight_interval,best_out
 
     def search_best_input(self,x,w_sim,b_sim,op,raw_out,init_interval):
@@ -283,10 +286,87 @@ class PowerOf2EasyQuant(EasyQuant):
             max_value=2**(self.a_bit-1)
             a_int=torch.round_(x/now_interval).clamp(-max_value,max_value-1)
             a_sim=a_int*now_interval
-            out_sim=op(a_sim,w_sim,b_sim)
-            similarity=F.cosine_similarity(out_sim.view(-1),raw_out.view(-1),0)
+            output_sim=op(a_sim,w_sim,b_sim)
+            similarity=F.cosine_similarity(output_sim.view(-1),raw_out.view(-1),0)
             if similarity>max_similarity:
                 best_input_interval=now_interval
                 max_similarity=similarity
-                best_out=out_sim
+                best_out=output_sim
         return best_input_interval,best_out
+
+class PowerOf2EasyQuant(EasyQuant):
+    def __init__(self, w_bit, a_bit,channel_wise=False,eq_alpha=0.5,eq_beta=2,eq_n=100) -> None:
+        super().__init__(w_bit, a_bit, channel_wise=channel_wise, eq_alpha=eq_alpha, eq_beta=eq_beta, eq_n=eq_n)
+        self.output_interval=None
+    
+    def quant_output(self,output,output_interval=None):
+        if output_interval is None: output_interval=self.output_interval
+        if self.channel_wise:
+            output_interval=output_interval.view(1,-1,*[1]*(output.dim()-2))
+        max_value=2**(self.a_bit-1)
+        a_int=torch.round_(output/output_interval).clamp(-max_value,max_value-1)
+        a_sim=a_int*output_interval
+        return a_sim
+
+    def search_best_input_output(self,x,w_sim,b_sim,op,raw_out,init_interval):
+        max_similarity=-2
+        best_input_interval=None
+        best_output_interval=None
+        best_out=None
+        for i in range(self.eq_n):
+            now_interval=(self.eq_alpha+i/self.eq_n*(self.eq_beta-self.eq_alpha))*init_interval
+            max_value=2**(self.a_bit-1)
+            a_int=torch.round_(x/now_interval).clamp(-max_value,max_value-1)
+            a_sim=a_int*now_interval
+            output_sim=op(a_sim,w_sim,b_sim)
+            init_output_interval=output_sim.max()
+            if self.channel_wise:
+                raise NotImplementedError
+            init_output_interval/=(2**(self.a_bit-1)-0.5)
+            tmp_scale=self.weight_interval*now_interval
+            init_output_interval=tmp_scale/2**torch.round(torch.log2(tmp_scale/init_output_interval))
+            for j in range(-4,4):
+                now_output_interval=2**j*init_output_interval
+                output_q_int=torch.round_(output_sim/now_output_interval).clamp(-max_value,max_value-1)
+                output_q_sim=output_q_int*now_output_interval
+                similarity=F.cosine_similarity(output_q_sim.view(-1),raw_out.view(-1),0)
+                if similarity>max_similarity:
+                    best_input_interval=now_interval
+                    best_output_interval=now_output_interval
+                    max_similarity=similarity
+                    best_out=output_sim
+        return best_input_interval,best_output_interval,best_out
+    
+    def calibration(self,x,weight,bias,op):
+        # step1: collection the FP32 values
+        if self.calibration_step==1:
+            out=op(x,weight,bias)
+            self.raw_outs.append(out.cpu().detach())
+            return out
+        # step1: search for the best S^w of each layer
+        elif self.calibration_step==2:
+            # initialize
+            if self.channel_wise:
+                max=weight.data.abs().view(weight.size(0),-1).max(1)[0]
+                max=max.view(-1,*[1]*(weight.dim()-1))
+            else:
+                max=weight.data.abs().max()
+            init_interval=max/(2**(self.w_bit-1)-0.5) # symmetric quantization
+            raw_out=torch.cat(self.raw_outs,0).to(x.device)
+            self.weight_interval,best_out=self.search_best_weight(x,weight,bias,op,raw_out,init_interval)
+            print(f"Set weight_interval={self.weight_interval.view(-1)}")
+            return best_out
+        # step3: search for the best S^a of each layer
+        elif self.calibration_step==3:
+            w_sim,b_sim=self.quant_weight_bias(weight,bias)
+            # initialize
+            if self.channel_wise:
+                max=x.data.abs().transpose(0,1).reshape(x.size(1),-1).max(1)[0]
+                max=max.view(1,-1,*[1]*(weight.dim()-2))
+            else:
+                max=x.data.abs().max()
+            init_interval=max/(2**(self.a_bit-1)-0.5) # symmetric quantization
+            raw_out=torch.cat(self.raw_outs,0).to(x.device)
+            self.input_interval,self.output_interval,best_out=self.search_best_input_output(x,w_sim,b_sim,op,raw_out,init_interval)
+            print(f"Set input_interval={self.input_interval.view(-1)} output_interval={self.output_interval.view(-1)}")
+            return best_out
