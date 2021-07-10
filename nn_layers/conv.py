@@ -58,11 +58,15 @@ class QuantizeConv2d(nn.Conv2d):
         out_sim=F.conv2d(x_sim, weight_sim, bias_sim, self.stride, self.padding, self.dilation, self.groups)
         return out_sim
     
+    def get_quant_weight_bias(self):
+        return self.quantizer.quant_weight_bias(self.weight,self.bias)
+
     def calibrate_forward(self,x):
         assert self.weight_bits is not None and self.act_bits is not None, f"You should set the weight_bits and bias_bits for {self}"
-        self.quantizer.calibration(self.weight,x)
-        weight_sim,bias_sim=self.quantizer.quant_weight_bias(self.weight,self.bias)
-        x_sim=self.quantizer.quant_activation(x)
+        op=lambda input,weight,bias:F.conv2d(input,weight,bias,self.stride,self.padding, self.dilation, self.groups)
+        out_sim=self.quantizer.calibration(x,self.weight,self.bias,op)
+        # weight_sim,bias_sim=self.quantizer.quant_weight_bias(self.weight,self.bias)
+        # x_sim=self.quantizer.quant_activation(x)
         # if not hasattr(x_sim,'scale'):
         #     x_sim=SignedQuantizeCalibration().apply(x_sim,self.act_bits)
         # # raw_out=super().forward(x_sim)
@@ -79,7 +83,7 @@ class QuantizeConv2d(nn.Conv2d):
         #     self.bias_integer=bias_integer
         # else:
         #     bias_sim=None
-        out_sim=F.conv2d(x_sim, weight_sim, bias_sim, self.stride, self.padding, self.dilation, self.groups)
+        # out_sim=F.conv2d(x_sim, weight_sim, bias_sim, self.stride, self.padding, self.dilation, self.groups)
         # out_sim=SignedQuantizeCalibration().apply(out_sim_,self.act_bits)
         return out_sim
 

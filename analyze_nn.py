@@ -23,15 +23,13 @@ def load_net(name):
 
 def load_datasets(name,data_root):
     if name=='imagenet':
-        g=datasets.ImageNetLoaderGenerator(data_root,'imagenet',128,8,4)
+        g=datasets.ImageNetLoaderGenerator(data_root,'imagenet',128,128,4)
         test_loader=g.test_loader(shuffle=True)
-        calib_loader=g.train_loader()
-        calib_loader.dataset.transform=g.transform_test
+        calib_loader=g.calib_loader()
     elif name=='cifar10':
-        g=datasets.CIFARLoaderGenerator(data_root,'cifar10',128,8,4)
+        g=datasets.CIFARLoaderGenerator(data_root,'cifar10',128,64,4)
         test_loader=g.test_loader(shuffle=False)
-        calib_loader=g.train_loader()
-        calib_loader.dataset.transform=g.transform_test
+        calib_loader=g.calib_loader()
     else:
         raise NotImplementedError
     return test_loader,calib_loader
@@ -45,7 +43,38 @@ def parse_args():
     args=parser.parse_args()
     return args
 
-def wrap_modules_in_net(net,act_bits=4,weight_bits=4):
+def _fold_bn(conv_module, bn_module):
+    w = conv_module.weight.data
+    y_mean = bn_module.running_mean
+    y_var = bn_module.running_var
+    safe_std = torch.sqrt(y_var + bn_module.eps)
+    w_view = (conv_module.out_channels, 1, 1, 1)
+    if bn_module.affine:
+        weight = w * (bn_module.weight / safe_std).view(w_view)
+        beta = bn_module.bias - bn_module.weight * y_mean / safe_std
+        if conv_module.bias is not None:
+            bias = bn_module.weight * conv_module.bias / safe_std + beta
+        else:
+            bias = beta
+    else:
+        weight = w / safe_std.view(w_view)
+        beta = -y_mean / safe_std
+        if conv_module.bias is not None:
+            bias = conv_module.bias / safe_std + beta
+        else:
+            bias = beta
+    return weight, bias
+
+
+def fold_bn_into_conv(conv_module, bn_module):
+    w, b = _fold_bn(conv_module, bn_module)
+    if conv_module.bias is None:
+        conv_module.bias = nn.Parameter(b.data)
+    else:
+        conv_module.bias.data = b.data
+    conv_module.weight.data = w.data
+
+def wrap_modules_in_net(net,act_bits=4,weight_bits=4,fuse_bn=False,layer_quantizer=quantizer.ACIQ):
     wrapped_modules={}
     slice_size=4
     
@@ -61,34 +90,47 @@ def wrap_modules_in_net(net,act_bits=4,weight_bits=4):
             _m.act_bits=act_bits
             _m.weight_bits=weight_bits
             _m.slice_size=slice_size
-            _m.quantizer=quantizer.ACIQ(weight_bits,act_bits)
+            _m.quantizer=layer_quantizer(weight_bits,act_bits)
             wrapped_modules[name]=_m
             _m.weight.data=m.weight.data
             _m.bias=m.bias
             m.forward_backup=m.forward
             m.forward=_m.forward
             _m.mode='raw'
+        if isinstance(m,nn.BatchNorm2d):
+            # print(wrapped_modules)
+            print(f"fuse {name}")
+            conv=wrapped_modules[name.replace('bn','conv').replace('downsample.1','downsample.0')]
+            conv.bn_fused=True
+            fold_bn_into_conv(conv,m)
+            # conv.weight.data=w
+            # conv.bias=nn.Parameter(b)
+            m.forward_back=m.forward
+            m.forward=lambda x:x
     return wrapped_modules
 
 def quant_calib(net,wrapped_modules,calib_loader,calib_size=128):
     calib_layers=[]
+    n_calibration_steps=1
     for name,module in wrapped_modules.items():
         module.mode='calibration_forward'
         calib_layers.append(name)
-    print(f"prepare calibration for {calib_layers}")
+        n_calibration_steps=max(n_calibration_steps,module.quantizer.n_calibration_steps)
+    print(f"prepare calibration for {calib_layers}\n n_calibration_steps={n_calibration_steps}")
     cnt=0
-    calib_inps=[]
-    with torch.no_grad():
-        for inp,target in calib_loader:
-            inp=inp.cuda()
-            calib_inps.append(inp)
-            cnt+=inp.size(0)
-            if cnt>=calib_size:
-                break
-    net(torch.cat(calib_inps,0))
+    for step in range(n_calibration_steps):
+        print(f"Start calibration step={step+1}")
+        for name,module in wrapped_modules.items():
+            module.quantizer.calibration_step=step+1
+        with torch.no_grad():
+            for inp,target in calib_loader:
+                inp=inp.cuda()
+                net(inp)
+                cnt+=inp.size(0)
+                if cnt>=calib_size:
+                    break
     for name,module in wrapped_modules.items():
         module.mode='quant_forward'
-    del calib_inps
     print("calibration finished")
 
 if __name__=='__main__':

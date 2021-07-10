@@ -1,3 +1,8 @@
+"""
+Reuse version v3
+Author: Hahn Yuan
+"""
+
 import torch
 import argparse
 import numpy as np
@@ -38,24 +43,27 @@ class LoaderGenerator():
         self.num_workers=num_workers
         self.kwargs=kwargs
         self.items=[]
-        self.train_set=None
-        self.val_set=None
-        self.test_set=None
-        self.trainval_set=None
+        self._train_set=None
+        self._test_set=None
+        self._calib_set=None
+        self.train_transform=None
+        self.test_transform=None
         self.train_loader_kwargs = {
             'num_workers': self.num_workers ,
             'pin_memory': kwargs.get('pin_memory',True),
             'drop_last':kwargs.get('drop_last',False)
             }
         self.test_loader_kwargs=self.train_loader_kwargs.copy()
-        self.transform_train=None
-        self.transform_test=None
         self.load()
     
-    def split_train_val(self,splittor):
-        self.trainval_set=self.train_set
-        self.train_set,self.val_set=splittor.split(self.train_set)
-
+    @property
+    def train_set(self):
+        pass
+    
+    @property
+    def test_set(self):
+        pass
+    
     def load(self):
         pass
     
@@ -74,31 +82,48 @@ class LoaderGenerator():
     def trainval_loader(self):
         assert self.trainval_set is not None
         return torch.utils.data.DataLoader(self.trainval_set, batch_size=self.train_batch_size, shuffle=True,  **self.train_loader_kwargs)
+
+    def calib_loader(self,num=1024,seed=3):
+        if self._calib_set is None:
+            np.random.seed(seed)
+            inds=np.random.permutation(len(self.train_set))[:num]
+            self._calib_set=torch.utils.data.Subset(copy.deepcopy(self.train_set),inds)
+            self._calib_set.dataset.transform=self.test_transform
+        return torch.utils.data.DataLoader(self._calib_set, batch_size=self.train_batch_size, shuffle=False,  **self.train_loader_kwargs)
         
 class CIFARLoaderGenerator(LoaderGenerator):
     def load(self):
         if self.dataset_name=='cifar100':
-            dataset_fn=datasets.CIFAR100
+            self.dataset_fn=datasets.CIFAR100
             normalize = transforms.Normalize(mean=[0.5071, 0.4865, 0.4409],
                                              std=[0.2673, 0.2564, 0.2762])
         elif self.dataset_name=='cifar10':
-            dataset_fn=datasets.CIFAR10
+            self.dataset_fn=datasets.CIFAR10
             normalize = transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
                                              std=[0.2470, 0.2435, 0.2616])
         else:
             raise NotImplementedError
-        transform_train = transforms.Compose([
+        self.train_transform = transforms.Compose([
             transforms.RandomCrop(32,padding=4),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             normalize,
         ])
-        self.transform_test = transforms.Compose([
+        self.test_transform = transforms.Compose([
             transforms.ToTensor(),
             normalize,
         ])
-        self.train_set=dataset_fn(self.root, train=True, download=True, transform=self.transform_train)
-        self.test_set=dataset_fn(self.root, train=False, transform=self.transform_test)
+    @property
+    def train_set(self):
+        if self._train_set is None:
+            self._train_set=self.dataset_fn(self.root, train=True, download=True, transform=self.train_transform)
+        return self._train_set
+
+    @property
+    def test_set(self):
+        if self._test_set is None:
+            self._test_set=self.dataset_fn(self.root, train=False, transform=self.test_transform)
+        return self._test_set
 
 class COCOLoaderGenerator(LoaderGenerator):
     def load(self):
@@ -129,7 +154,7 @@ class DetectionListDataset(Dataset):
             img_path = self.img_files[index % len(self.img_files)].rstrip()
             img = np.array(Image.open(img_path).convert('RGB'), dtype=np.uint8)
         except Exception as e:
-            # print(f"Could not read image '{img_path}'.")
+            print(f"Could not read image '{img_path}'.")
             return
         try:
             label_path = self.label_files[index % len(self.img_files)].rstrip()
@@ -138,7 +163,7 @@ class DetectionListDataset(Dataset):
                 warnings.simplefilter("ignore")
                 boxes = np.loadtxt(label_path).reshape(-1, 5)
         except Exception as e:
-            # print(f"Could not read label '{label_path}'.")
+            print(f"Could not read label '{label_path}'.")
             return
         if self.transform:
             try:
@@ -152,6 +177,7 @@ class DetectionListDataset(Dataset):
         self.batch_count += 1
         # Drop invalid images
         batch = [data for data in batch if data is not None]
+        
         paths, imgs, bb_targets = list(zip(*batch))
         # Selects new image size every tenth batch
         if self.multiscale and self.batch_count % 10 == 0:
@@ -171,7 +197,7 @@ class ImageNetLoaderGenerator(LoaderGenerator):
     def load(self):
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
-        self.transform_train = transforms.Compose([
+        self.train_transform = transforms.Compose([
             transforms.Resize(256),
                 transforms.RandomResizedCrop(224),
                 transforms.RandomHorizontalFlip(),
@@ -179,19 +205,24 @@ class ImageNetLoaderGenerator(LoaderGenerator):
                 normalize,
             ])
 
-        self.transform_test = transforms.Compose([
+        self.test_transform = transforms.Compose([
                 transforms.Resize(256),
                 transforms.CenterCrop(224),
                 transforms.ToTensor(),
                 normalize,
             ])
-        def dataset_fn(dataset_root,train,download=False,transform=None):
-            if train:
-                return ImageFolder(os.path.join(dataset_root,'train'), transform)
-            else:
-                return ImageFolder(os.path.join(dataset_root,'val'), transform)
-        self.train_set=dataset_fn(self.root, train=True, download=True, transform=self.transform_train)
-        self.test_set=dataset_fn(self.root, train=False, transform=self.transform_test)
+    
+    @property
+    def train_set(self):
+        if self._train_set is None:
+            self._train_set=ImageFolder(os.path.join(self.root,'train'), self.train_transform)
+        return self._train_set
+
+    @property
+    def test_set(self):
+        if self._test_set is None:
+            self._test_set=ImageFolder(os.path.join(self.root,'val'), self.test_transform)
+        return self._test_set
 
 class DebugLoaderGenerator(LoaderGenerator):
 
