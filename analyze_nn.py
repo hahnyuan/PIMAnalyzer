@@ -21,15 +21,15 @@ def load_net(name):
     net=net.cuda()
     return net
 
-def load_datasets(name,data_root):
+def load_datasets(name,data_root,calib_size=128):
     if name=='imagenet':
-        g=datasets.ImageNetLoaderGenerator(data_root,'imagenet',128,128,4)
+        g=datasets.ImageNetLoaderGenerator(data_root,'imagenet',calib_size,128,4)
         test_loader=g.test_loader(shuffle=True)
-        calib_loader=g.calib_loader()
+        calib_loader=g.calib_loader(calib_size)
     elif name=='cifar10':
-        g=datasets.CIFARLoaderGenerator(data_root,'cifar10',128,64,4)
+        g=datasets.CIFARLoaderGenerator(data_root,'cifar10',calib_size,128,4)
         test_loader=g.test_loader(shuffle=False)
-        calib_loader=g.calib_loader()
+        calib_loader=g.calib_loader(calib_size)
     else:
         raise NotImplementedError
     return test_loader,calib_loader
@@ -107,7 +107,7 @@ def wrap_modules_in_net(net,act_bits=4,weight_bits=4,fuse_bn=False,layer_quantiz
             m.forward=lambda x:x
     return wrapped_modules
 
-def quant_calib(net,wrapped_modules,calib_loader,calib_size=128):
+def quant_calib(net,wrapped_modules,calib_loader):
     calib_layers=[]
     n_calibration_steps=1
     for name,module in wrapped_modules.items():
@@ -115,7 +115,6 @@ def quant_calib(net,wrapped_modules,calib_loader,calib_size=128):
         calib_layers.append(name)
         n_calibration_steps=max(n_calibration_steps,module.quantizer.n_calibration_steps)
     print(f"prepare calibration for {calib_layers}\n n_calibration_steps={n_calibration_steps}")
-    cnt=0
     for step in range(n_calibration_steps):
         print(f"Start calibration step={step+1}")
         for name,module in wrapped_modules.items():
@@ -124,9 +123,6 @@ def quant_calib(net,wrapped_modules,calib_loader,calib_size=128):
             for inp,target in calib_loader:
                 inp=inp.cuda()
                 net(inp)
-                cnt+=inp.size(0)
-                if cnt>=calib_size:
-                    break
     for name,module in wrapped_modules.items():
         module.mode='quant_forward'
     print("calibration finished")
