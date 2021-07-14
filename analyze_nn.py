@@ -24,7 +24,7 @@ def load_net(name):
 def load_datasets(name,data_root,calib_size=128):
     if name=='imagenet':
         g=datasets.ImageNetLoaderGenerator(data_root,'imagenet',calib_size,128,4)
-        test_loader=g.test_loader(shuffle=True)
+        test_loader=g.test_loader(shuffle=True,batch_size=16)
         calib_loader=g.calib_loader(calib_size)
     elif name=='cifar10':
         g=datasets.CIFARLoaderGenerator(data_root,'cifar10',calib_size,128,4)
@@ -39,7 +39,9 @@ def parse_args():
     parser.add_argument('net_name',type=str)
     parser.add_argument('dataset',type=str)
     parser.add_argument('--data_root',default="data",type=str)
-    parser.add_argument('--statistic_size',type=int,default=32)
+    parser.add_argument('--quantizer',default="aciq",type=str)
+    parser.add_argument('--statistic_num',type=int,default=32)
+    parser.add_argument('--out_path',type=str,default='output')
     args=parser.parse_args()
     return args
 
@@ -73,7 +75,7 @@ def fold_bn_into_conv(conv_module, bn_module):
         conv_module.bias.data = b.data
     conv_module.weight.data = w.data
 
-def wrap_modules_in_net(net,act_bits=4,weight_bits=4,fuse_bn=False,layer_quantizer=quantizer.ACIQ):
+def wrap_modules_in_net(net,act_bits=8,weight_bits=8,fuse_bn=False,layer_quantizer=quantizer.ACIQ):
     wrapped_modules={}
     slice_size=4
     
@@ -131,10 +133,15 @@ if __name__=='__main__':
     args=parse_args()
     net=load_net(args.net_name)
     test_loader,calib_loader=load_datasets(args.dataset,args.data_root)
-    wrapped_modules=wrap_modules_in_net(net)
+    if args.quantizer=='aciq':
+        layer_quantizer=quantizer.ACIQ
+    elif args.quantizer=='easyquant':
+        layer_quantizer=quantizer.EasyQuant
+    elif args.quantizer=='dfq':
+        layer_quantizer=quantizer.DFQ
+    wrapped_modules=wrap_modules_in_net(net,layer_quantizer=layer_quantizer)
     quant_calib(net,wrapped_modules,calib_loader)
 
-    statistic_size=args.statistic_size
     for name,module in wrapped_modules.items():
         module.mode='statistic_forward'
     cnt=0
@@ -143,7 +150,7 @@ if __name__=='__main__':
             inp=inp.cuda()
             net(inp)
             cnt+=inp.size(0)
-            if cnt>=statistic_size:
+            if cnt>=args.statistic_num:
                 break
     
     zero_out_exclude_in_zero_tot=0
@@ -154,22 +161,24 @@ if __name__=='__main__':
 
     tot_zero_out=0
     tot_out=0
-
+    if not os.path.exists(args.out_path):
+        os.makedirs(args.out_path)
     for name,module in wrapped_modules.items():
         # print(module.statistic)
         s=module.statistic
+        
+        torch.save(s,f'{args.out_path}/{name}.pth')
+        
         in_zero_frac=[s[f'zero_in_{i}']/s['in_num'] for i in range(module.act_bits)]
         print(f"{name} in_zero/tot {in_zero_frac}")
         tot_zero_in+=np.sum([s[f'zero_in_{i}'] for i in range(module.act_bits)])
         tot_in+=np.sum([s['in_num'] for i in range(module.act_bits)])
         
 
-
         out_zero_frac=[s[f'zero_out_{i}']/s['out_num'] for i in range(module.weight_bits)]
         print(f"{name} out_zero/tot {out_zero_frac}")
         tot_zero_out+=np.sum([s[f'zero_out_{i}'] for i in range(module.act_bits)])
         tot_out+=np.sum([s[f'out_num'] for i in range(module.act_bits)])
-        
 
         out_zero_frac_exclude_in_zero=[s[f'zero_out_{i}_exclude_in_zero']/(s[f'tot_out_{i}_exclude_in_zero']) for i in range(module.weight_bits)]
         print(f"{name} out_zero_exclude_in_zero/tot_exclude_in_zero {out_zero_frac_exclude_in_zero}")

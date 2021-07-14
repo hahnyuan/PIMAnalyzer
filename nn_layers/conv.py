@@ -125,19 +125,29 @@ class BitwiseStatisticConv2d(QuantizeConv2d):
         self.statistic={}
         
     def statistic_forward(self,x):
-        if 'in_quant' in self.activation_quant_mode:
-            if self.activation_quant_mode=='in_quant_unsigned':
-                in_max_int=2**(self.act_bits)-1
-            else:
-                in_max_int=2**(self.act_bits-1)-1
-            in_integer=torch.round_(x/self.x_scale).clamp_(-in_max_int,in_max_int)
-            x=in_integer*self.x_scale
-        w_max_int=2**(self.weight_bits)-1
-        w_integer=torch.round_(self.weight.data/self.weight_scale).clamp_(-w_max_int,w_max_int)
-        w_q=w_integer*self.weight_scale
-        raw_out=F.conv2d(x,w_q,self.bias,self.stride,self.padding,self.dilation,self.groups)
+        print(f"Run statistic_forward of {self} with input {x.size()}")
+        weight_sim,bias_sim=self.quantizer.quant_weight_bias(self.weight,self.bias)
+        w_integer=weight_sim.integer
+        x_sim=self.quantizer.quant_activation(x)
+        in_integer=x_sim.integer
+        out_sim=F.conv2d(x_sim, weight_sim, bias_sim, self.stride, self.padding, self.dilation, self.groups)
+        out_sim=self.quantizer.quant_output(out_sim)
         
-        b,oc,oh,ow=raw_out.size()
+        
+        # if 'in_quant' in self.activation_quant_mode:
+        #     if self.activation_quant_mode=='in_quant_unsigned':
+        #         in_max_int=2**(self.act_bits)-1
+        #     else:
+        #         in_max_int=2**(self.act_bits-1)-1
+        #     in_integer=torch.round_(x/self.x_scale).clamp_(-in_max_int,in_max_int)
+        #     x=in_integer*self.x_scale
+        # w_max_int=2**(self.weight_bits)-1
+        # w_integer=torch.round_(self.weight.data/self.weight_scale).clamp_(-w_max_int,w_max_int)
+        # w_q=w_integer*self.weight_scale
+        # raw_out=F.conv2d(x,w_q,self.bias,self.stride,self.padding,self.dilation,self.groups)
+        
+        # b,oc,oh,ow=raw_out.size()
+        b,oc,oh,ow=out_sim.size()
         
         kernel_size=self.weight.size()[2:]
         x_unfolded=F.unfold(in_integer,kernel_size,self.dilation,self.padding,self.stride) # shape N,C×∏(kernel_size),L
@@ -191,7 +201,7 @@ class BitwiseStatisticConv2d(QuantizeConv2d):
                     # shape of zero out: n_slice*(b*oc*L); shape of zero in: b*n_slice*L
                     self.statistic[f'tot_out_{w_bit_i}_exclude_in_zero']+=psum.numel()*n_slice-oc*zero_in_num
                 
-        return raw_out
+        return out_sim
 
 class BaseMappedConv2d(nn.Conv2d):
     """

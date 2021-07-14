@@ -71,9 +71,11 @@ class LoaderGenerator():
         assert self.train_set is not None
         return torch.utils.data.DataLoader(self.train_set, batch_size=self.train_batch_size, shuffle=True,  **self.train_loader_kwargs)
     
-    def test_loader(self,shuffle=False):
+    def test_loader(self,shuffle=False,batch_size=None):
         assert self.test_set is not None
-        return torch.utils.data.DataLoader(self.test_set, batch_size=self.test_batch_size, shuffle=shuffle,  **self.test_loader_kwargs)
+        if batch_size is None:
+            batch_size=self.test_batch_size
+        return torch.utils.data.DataLoader(self.test_set, batch_size=batch_size, shuffle=shuffle,  **self.test_loader_kwargs)
     
     def val_loader(self):
         assert self.val_set is not None

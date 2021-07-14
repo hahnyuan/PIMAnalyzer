@@ -24,7 +24,7 @@ Example of analyze ResNet-18 on ImageNet dataset.
 At first, put your ImageNet dataset into folder `data/imagenet`.
 Then run this command:
 ```
-python3 analyze_nn.py resnet18 imagenet
+python3 analyze_nn.py resnet18 imagenet --data_root <path-to-data>
 ```
 
 The distribution of each layer, and the distribution of all layers is printed.
