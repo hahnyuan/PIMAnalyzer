@@ -42,6 +42,8 @@ def parse_args():
     parser.add_argument('--quantizer',default="aciq",type=str)
     parser.add_argument('--statistic_num',type=int,default=32)
     parser.add_argument('--out_path',type=str,default='output')
+    # PIM-based settings
+    parser.add_argument('--active_rows',default=8,type=int)
     args=parser.parse_args()
     return args
 
@@ -77,7 +79,7 @@ def fold_bn_into_conv(conv_module, bn_module):
 
 def wrap_modules_in_net(net,act_bits=8,weight_bits=8,fuse_bn=False,layer_quantizer=quantizer.ACIQ):
     wrapped_modules={}
-    slice_size=4
+    slice_size=args.active_rows
     
     for name,m in net.named_modules():
         if isinstance(m,nn.Conv2d):
